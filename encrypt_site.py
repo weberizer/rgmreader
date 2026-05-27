@@ -18,8 +18,8 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 # ─── CONFIGURACIÓN ──────────────────────────────────────────────────────
-USERNAME = "admin"
-PASSWORD = "rgmreader2026"     # ← CÁMBIALA y vuelve a correr el script
+USERNAME = "admin1Benito"
+PASSWORD = "Animalrgmdallas26!"   # ← change me and re-run the script to rotate
 PBKDF2_ITERATIONS = 250_000     # robusta vs ataques de fuerza bruta offline
 # ────────────────────────────────────────────────────────────────────────
 
