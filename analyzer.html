@@ -360,17 +360,20 @@ function computeElasticities(){
   const skus = [...new Set(DATA.map(r=>r.sku))];
   for (const sku of skus){
     const rows = DATA.filter(r=>r.sku===sku);
-    const overall = regress(rows.map(r=>r.price), rows.map(r=>r.volume));
     const product_name = rows[0].product_name || '';
+    // Detrended regression by (sku, channel) accumulated across channels for SKU-level elasticity
+    const skuPts = collectDetrendedPoints(rows);
+    const overall = regressThroughOrigin(skuPts.xs, skuPts.ys);
 
-    // Optional per-channel
+    // Per-channel
     const perChannel = {};
     if (rows[0].channel){
       const channels = [...new Set(rows.map(r=>r.channel))];
       for (const ch of channels){
         const chRows = rows.filter(r=>r.channel===ch);
-        if (chRows.length >= 10){
-          perChannel[ch] = regress(chRows.map(r=>r.price), chRows.map(r=>r.volume));
+        if (chRows.length >= 12){
+          const pts = collectDetrendedPoints(chRows);
+          perChannel[ch] = regressThroughOrigin(pts.xs, pts.ys);
           perChannel[ch].n = chRows.length;
         }
       }
@@ -379,20 +382,56 @@ function computeElasticities(){
     results.push({
       sku, product_name,
       n: rows.length,
+      nPoints: skuPts.xs.length,
       avgPrice: rows.reduce((a,r)=>a+r.price,0)/rows.length,
       avgVolume: rows.reduce((a,r)=>a+r.volume,0)/rows.length,
       priceCV: cv(rows.map(r=>r.price)),
       elasticity: overall.slope,
       r2: overall.r2,
       perChannel,
-      reliability: classifyReliability(overall, rows.length, cv(rows.map(r=>r.price)))
+      reliability: classifyReliability(overall, skuPts.xs.length, cv(rows.map(r=>r.price)))
     });
   }
   return results.sort((a,b)=>a.elasticity - b.elasticity);
 }
 
+// Collect (Δlog P, Δlog Q) pairs vs trailing 8-period baseline within each (sku, channel) series.
+// Detrending neutralizes seasonality + trend, which contaminate naive log-log regression.
+function collectDetrendedPoints(rows){
+  const xs = [], ys = [];
+  const groups = groupBy(rows, r => (r.channel||'ALL'));
+  for (const grp of Object.values(groups)){
+    const sorted = grp.slice().sort((a,b)=>a.date - b.date);
+    for (let i=8; i<sorted.length; i++){
+      const window = sorted.slice(i-8, i);
+      const baseP = median(window.map(r=>r.price));
+      const baseV = median(window.map(r=>r.volume));
+      if (baseP<=0 || baseV<=0) continue;
+      const dP = Math.log(sorted[i].price) - Math.log(baseP);
+      const dQ = Math.log(sorted[i].volume) - Math.log(baseV);
+      if (Math.abs(dP) < 0.003) continue;  // skip near-zero price changes (regression-noise)
+      xs.push(dP); ys.push(dQ);
+    }
+  }
+  return {xs, ys};
+}
+
+// Linear regression through origin (no intercept) for the detrended deltas.
+function regressThroughOrigin(xs, ys){
+  const n = xs.length;
+  if (n < 5) return {slope:0, r2:0};
+  const num = xs.reduce((a,x,i)=>a + x*ys[i], 0);
+  const den = xs.reduce((a,x)=>a + x*x, 0);
+  const slope = den>0 ? num/den : 0;
+  const ssRes = xs.reduce((a,x,i)=>a + (ys[i]-slope*x)**2, 0);
+  const my = ys.reduce((a,y)=>a+y,0) / n;
+  const ssTot = ys.reduce((a,y)=>a + (y-my)**2, 0);
+  const r2 = ssTot>0 ? Math.max(0, 1 - ssRes/ssTot) : 0;
+  return {slope, r2, n};
+}
+
+// Kept for backward compatibility (used nowhere now, but harmless)
 function regress(prices, volumes){
-  // log-log: log(Q) = a + e * log(P)
   const xs = prices.map(p=>Math.log(p));
   const ys = volumes.map(v=>Math.log(v));
   const n = xs.length;
@@ -496,8 +535,9 @@ function personalizedPricing(){
   const groups = groupBy(DATA, r => r.sku + '||' + (r.channel||'ALL'));
   for (const [key, rows] of Object.entries(groups)){
     const [sku, channel] = key.split('||');
-    if (rows.length < 8) continue;
-    const reg = regress(rows.map(r=>r.price), rows.map(r=>r.volume));
+    if (rows.length < 12) continue;
+    const pts = collectDetrendedPoints(rows);
+    const reg = regressThroughOrigin(pts.xs, pts.ys);
     const e = reg.slope;
     const avgPrice = rows.reduce((a,r)=>a+r.price,0)/rows.length;
     const cost = rows.find(r=>r.cost)?.cost || null;
@@ -625,7 +665,7 @@ function renderElasticity(){
     <div class="module-head">
       <div>
         <h2>① Elasticidad por SKU</h2>
-        <p>Regresión log-log de precio vs volumen por SKU. La elasticidad mide qué tanto cae el volumen cuando sube 1% el precio.</p>
+        <p>Regresión sobre <strong>diferencias log vs baseline móvil de 8 semanas</strong>: ΔlogQ = e·ΔlogP. Este detrending neutraliza estacionalidad y trend, devolviendo elasticidades insesgadas (vs el log-log naive que las sobrestima).</p>
       </div>
     </div>
     <div class="scroll-x"><table class="numeric">
